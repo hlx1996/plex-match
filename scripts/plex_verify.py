@@ -272,36 +272,46 @@ def main():
                 agent = "tv.plex.agents.movie"
 
             clean = re.sub(r"[\(\[].*?[\)\]]", "", source).strip()
-            clean = re.sub(r"\.(BluRay|WEB|BD|DVD|1080p|2160p|720p|x264|x265|DD5|DTS|AAC|Remux).*", "", clean, flags=re.IGNORECASE).strip()
+            clean = re.sub(r"\.(BluRay|WEB|BD|DVD|1080p|2160p|720p|x264|x265|DD5|DTS|AAC|Remux|Complete|NF).*", "", clean, flags=re.IGNORECASE).strip()
             clean = re.sub(r"\d+\.", "", clean, count=1).strip()
+            clean = re.sub(r"(S\d+|Season\s*\d+|SP\d*)", "", clean, flags=re.IGNORECASE).strip()
+
+            chn_parts = re.findall(r"[\u4e00-\u9fff]+", clean)
+            chn_title = "".join(chn_parts) if chn_parts else ""
 
             eng_match = re.search(r"[A-Za-z][A-Za-z\s'\.\:\-]+[A-Za-z]", clean)
-            if eng_match:
-                search_title = eng_match.group().strip()
-            else:
-                chn = re.sub(r"[A-Za-z\s\.\:\-]+", " ", clean).strip()
-                search_title = chn if chn else clean
+            eng_title = eng_match.group().strip() if eng_match else ""
+
+            search_titles = []
+            if chn_title and len(chn_title) >= 2:
+                search_titles.append(chn_title)
+            if eng_title and len(eng_title) > 2:
+                search_titles.append(eng_title)
+            if not search_titles:
+                search_titles.append(clean)
 
             print(f"\n  [{s['lib']}] {source[:60]}", flush=True)
             print(f"  Current: {s['plex_title']} ({s['year']})", flush=True)
-            print(f"  Searching: '{search_title}'...", flush=True)
 
-            match = search_match(base, args.token, s["key"], search_title, s["year"], agent)
-            if match and match["name"] != s["plex_title"]:
-                new_sim = name_similarity(source, match["name"], "")
-                if new_sim > s["similarity"]:
-                    print(f"  Found: {match['name']} ({match['year']})", flush=True)
-                    if apply_match(base, args.token, s["key"], match["guid"], match["name"], match["year"]):
-                        print(f"  -> FIXED", flush=True)
-                        fixed.append({**s, "new_title": match["name"], "new_year": match["year"]})
-                    else:
-                        print(f"  -> FIX FAILED", flush=True)
-                        unfixable.append(s)
+            match = None
+            for st in search_titles:
+                print(f"  Searching: '{st}'...", flush=True)
+                match = search_match(base, args.token, s["key"], st, s["year"], agent)
+                if match and match["name"] != s["plex_title"]:
+                    new_sim = name_similarity(source, match["name"], "")
+                    if new_sim > s["similarity"]:
+                        break
+                match = None
+            if match:
+                print(f"  Found: {match['name']} ({match['year']})", flush=True)
+                if apply_match(base, args.token, s["key"], match["guid"], match["name"], match["year"]):
+                    print(f"  -> FIXED", flush=True)
+                    fixed.append({**s, "new_title": match["name"], "new_year": match["year"]})
                 else:
-                    print(f"  -> No better match found", flush=True)
+                    print(f"  -> FIX FAILED", flush=True)
                     unfixable.append(s)
             else:
-                print(f"  -> No alternative match in Plex DB", flush=True)
+                print(f"  -> No better match found", flush=True)
                 unfixable.append(s)
 
             time.sleep(args.delay)
