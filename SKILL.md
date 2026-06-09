@@ -112,8 +112,14 @@ Plex 按剧集（show）级别匹配，`year` 字段是整部剧的首播年份�
 
 不要因为一次搜索没结果就认定不存在。验证脚本对 failed 项也应多试几个关键词。
 
+### Plex Discover 目录中的资源可能搜不到
+部分资源存在于 Plex Discover 目录中，但不会出现在常规 `/matches` 搜索结果里。如果搜索多次都没有结果：
+1. 让用户在 Plex Web UI 的 Discover/Browse 中搜索该资源
+2. 打开详情页，从 URL 中提取 key（如 `/library/metadata/5d9c089bba6eb9001fba73de`）
+3. 用 `plex://movie/<id>` 格式的 guid 直接调用 match API 匹配
+
 ### Plex 数据库中确实不存在的资源无法匹配
-极少数冷门资源（如 Fassbinder 的 "世界旦夕之间" Welt am Draht, 1973）在 Plex 的元数据源（TMDB/TheTVDB）中不存在，无法自动匹配。这些应该报告给用户，由用户手动处理，**不要强行匹配到错误的结果**。
+极少数冷门资源可能在 Plex 的元数据源（TMDB/TheTVDB）中不存在，无法自动匹配。这些应该报告给用户，由用户手动处理，**不要强行匹配到错误的结果**。
 
 ### Plex API 不支持 Unmatch
 Plex 的 match API 只能将资源匹配到某个 guid，无法通过 API 取消匹配（Unmatch）。取消匹配只能在 Plex Web UI 中操作：点击 `...` → Match... → Unmatch。
