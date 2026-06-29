@@ -81,6 +81,63 @@ python3 <skill-dir>/scripts/plex_verify.py \
 - 仍无法匹配的项（建议用户检查文件名是否规范）
 - 提醒刷新 Plex 界面加载新元数据
 
+### Phase 6: 中文本地化 (Chinese Localization for Plex)
+
+匹配和验证完成后，运行 CLP 对媒体库进行中文本地化（拼音排序 + 标签汉化）。
+
+1. 克隆仓库并安装依赖：
+
+```bash
+cd /tmp && git clone https://github.com/x1ao4/chinese-localization-for-plex.git
+cd chinese-localization-for-plex
+pip3 install -r requirements.txt
+```
+
+2. 配置 `config/config.ini`：
+
+```ini
+[server]
+address = <BASE>
+token = <TOKEN>
+skip_libraries =
+```
+
+3. 运行处理所有项目：
+
+```bash
+python3 chinese-localization-for-plex.py --all
+```
+
+脚本会将所有中文标题的排序字段改为拼音首字母缩写，并将英文标签汉化。已处理的项目会被跳过。
+
+### Phase 7: Plex-Trakt 同步 (PlexTraktSync)
+
+本地化完成后，运行 PlexTraktSync 将 Plex 观看记录、评分、收藏同步到 Trakt。
+
+1. 安装：
+
+```bash
+pipx install PlexTraktSync
+```
+
+2. 登录配置（首次需要交互式配置 Trakt 和 Plex 凭据）：
+
+```bash
+plextraktsync login
+```
+
+按提示完成 Trakt OAuth 授权和 Plex 服务器连接。需要用户提供：
+- Trakt API Client ID 和 Client Secret（从 https://trakt.tv/oauth/applications/new 创建）
+- Plex 服务器 URL 和 Token（复用 Phase 1 获取的信息）
+
+3. 运行同步：
+
+```bash
+plextraktsync sync
+```
+
+同步完成后向用户汇报同步结果。
+
 ## 已知陷阱
 
 ### 不要盲目取第一个搜索结果
