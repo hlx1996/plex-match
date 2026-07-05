@@ -9,7 +9,7 @@ import re
 import sys
 import ssl
 import json
-import os
+from functools import lru_cache
 
 ctx = ssl.create_default_context()
 
@@ -62,7 +62,7 @@ def extract_folder_name(filepath, section_type):
 
 
 def extract_names(text):
-    eng = set(w.lower() for w in re.findall(r"[A-Za-z][A-Za-z']+", text) if len(w) > 2)
+    eng = set(w.lower() for w in re.findall(r"[A-Za-z0-9][A-Za-z0-9']*", text) if len(w) > 1)
     chn = set(re.findall(r"[\u4e00-\u9fff]{2,}", text))
     return eng, chn
 
@@ -70,32 +70,168 @@ def extract_names(text):
 STOP_WORDS = {
     "the", "and", "for", "with", "from", "that", "this", "have", "been",
     "was", "were", "are", "not", "but", "all", "can", "had", "her", "his",
-    "one", "our", "out", "you", "she", "will", "has", "its", "than",
+    "one", "our", "out", "you", "she", "will", "has", "its", "than", "of",
+    "to", "in", "on", "by", "at",
     "bluray", "remux", "web", "1080p", "2160p", "720p", "x264", "x265",
     "10bit", "dd5", "aac", "dts", "atmos", "truehd", "multi", "audio",
     "sub", "eng", "chs", "cht", "mkv", "mp4", "avi", "bd", "dvd",
-    "proper", "limited", "theatrical", "unrated",
+    "proper", "limited", "theatrical", "unrated", "extended", "edition",
+    "collectors", "collector", "hybrid", "repack", "imax", "criterion",
+    "complete", "uncut", "remastered", "restored", "dubbed", "dub",
+    "dual", "audio", "audios", "atmos", "hdr", "dv", "nf", "webdl",
+    "web", "dl", "blu", "ray", "mnhd", "frds", "leagueweb", "bthd",
+    "hdbthd", "btshd", "minepad", "minisd", "taikatalvi", "ipad",
 }
 
 
-def name_similarity(src, plex_title, orig_title=""):
-    src_eng, src_chn = extract_names(src)
-    plex_eng, plex_chn = extract_names(plex_title)
-    orig_eng, orig_chn = extract_names(orig_title) if orig_title else (set(), set())
+def normalize_source_name(source):
+    def keep_cjk_bracket(match):
+        inner = match.group(1).strip()
+        if re.search(r"[\u4e00-\u9fff]", inner):
+            return " {} ".format(inner)
+        return " "
 
-    src_eng_clean = src_eng - STOP_WORDS
-    plex_eng_clean = plex_eng - STOP_WORDS
+    cleaned = re.sub(r"\[([^\]]+)\]", keep_cjk_bracket, source)
+    cleaned = re.sub(r"\(([^)]+)\)", " ", cleaned)
+    cleaned = cleaned.replace(".", " ").replace("_", " ").replace("-", " ")
+    cleaned = re.sub(r"^\d+\s+", "", cleaned)
+    cleaned = re.sub(r"\b(19|20)\d{2}\b.*$", "", cleaned)
+    cleaned = re.sub(r"\b(S\d+|Season\s*\d+|SP\d*)\b.*$", "", cleaned, flags=re.IGNORECASE)
+    cleaned = re.sub(r"\s+", " ", cleaned).strip()
+    return cleaned or source
 
-    common_eng = (src_eng_clean & plex_eng_clean) | (src_eng_clean & orig_eng)
-    common_chn = (src_chn & plex_chn) | (src_chn & orig_chn)
+
+def basename(path):
+    if not path:
+        return ""
+    return path.rstrip("/").split("/")[-1]
+
+
+def token_sets(text):
+    eng, chn = extract_names(text)
+    return eng - STOP_WORDS, chn
+
+
+def token_similarity(source_text, candidate_text):
+    src_eng_clean, src_chn = token_sets(source_text)
+    cand_eng_clean, cand_chn = token_sets(candidate_text)
 
     if not src_eng_clean and not src_chn:
         return 1.0
 
-    eng_score = len(common_eng) / max(len(src_eng_clean), 1) if src_eng_clean else 0
-    chn_score = len(common_chn) / max(len(src_chn), 1) if src_chn else 0
+    eng_union = src_eng_clean | cand_eng_clean
+    chn_union = src_chn | cand_chn
+    eng_score = len(src_eng_clean & cand_eng_clean) / max(len(eng_union), 1) if src_eng_clean else 0
+    chn_score = len(src_chn & cand_chn) / max(len(chn_union), 1) if src_chn else 0
 
     return max(eng_score, chn_score)
+
+
+def candidate_similarity(src, candidate_text):
+    return token_similarity(normalize_source_name(src), candidate_text)
+
+
+def name_similarity(src, plex_title, orig_title="", slug=""):
+    source_text = normalize_source_name(src)
+    candidates = [plex_title, orig_title]
+    if slug:
+        candidates.append(slug.replace("-", " "))
+    return max(token_similarity(source_text, candidate) for candidate in candidates if candidate)
+
+
+def franchise_subset_risk(src, title, orig_title="", slug=""):
+    source_text = normalize_source_name(src)
+    src_eng, src_chn = token_sets(source_text)
+    if src_chn or not src_eng:
+        return False
+
+    for candidate in filter(None, [orig_title, slug.replace("-", " ") if slug else ""]):
+        cand_eng, cand_chn = token_sets(candidate)
+        if cand_chn or not cand_eng:
+            continue
+        if src_eng < cand_eng and len(cand_eng - src_eng) >= 2 and candidate_similarity(src, title) == 0:
+            return True
+    return False
+
+
+def weak_overlap_risk(src, title, orig_title="", slug=""):
+    if candidate_similarity(src, title) > 0:
+        return False
+
+    source_text = normalize_source_name(src)
+    src_eng, src_chn = token_sets(source_text)
+    if src_chn or len(src_eng) < 2:
+        return False
+
+    for candidate in filter(None, [orig_title, slug.replace("-", " ") if slug else ""]):
+        cand_eng, cand_chn = token_sets(candidate)
+        if cand_chn or not cand_eng:
+            continue
+        if len(src_eng & cand_eng) == 1:
+            return True
+    return False
+
+
+def generic_english_alias_risk(src, title, orig_title=""):
+    source_text = normalize_source_name(src)
+    title_text = normalize_source_name(title)
+    src_eng, src_chn = token_sets(source_text)
+    title_eng, title_chn = token_sets(title_text)
+    if src_chn or title_chn or not src_eng or src_eng != title_eng:
+        return False
+    if not (1 <= len(src_eng) <= 3):
+        return False
+
+    orig_eng, orig_chn = token_sets(orig_title)
+    if orig_chn:
+        return True
+    if orig_eng and not (src_eng & orig_eng):
+        return True
+    return False
+
+
+@lru_cache(maxsize=2048)
+def get_metadata_paths(base, token, rating_key):
+    data = api_get(base, token, f"/library/metadata/{rating_key}")
+    root = ET.fromstring(data)
+    locations = [loc.get("path", "") for loc in root.findall(".//Location") if loc.get("path")]
+    files = [part.get("file", "") for part in root.findall(".//Part") if part.get("file")]
+    return locations, files
+
+
+def source_candidates_for_item(base, token, rating_key, section_type, filepath):
+    candidates = []
+    if filepath:
+        filename = extract_filename(filepath)
+        folder = extract_folder_name(filepath, section_type)
+        if filename:
+            candidates.append(filename)
+        if folder:
+            candidates.append(folder)
+
+    locations, files = get_metadata_paths(base, token, rating_key)
+    if section_type == "show":
+        for path in locations:
+            name = basename(path)
+            if name:
+                candidates.append(name)
+    else:
+        for path in files:
+            filename = extract_filename(path)
+            folder = extract_folder_name(path, section_type)
+            if filename:
+                candidates.append(filename)
+            if folder:
+                candidates.append(folder)
+
+    deduped = []
+    seen = set()
+    for candidate in candidates:
+        key = candidate.strip().lower()
+        if key and key not in seen:
+            seen.add(key)
+            deduped.append(candidate)
+    return deduped
 
 
 def is_collection_folder(name):
@@ -162,6 +298,7 @@ def main():
     parser.add_argument("--threshold", type=float, default=0.15,
                         help="Similarity threshold below which a match is suspicious (default: 0.15)")
     parser.add_argument("--delay", type=float, default=0.3, help="Delay between API calls")
+    parser.add_argument("--result-file", default="/tmp/plex_verify_result.json", help="Where to save the JSON result")
     args = parser.parse_args()
 
     base = args.base.rstrip("/")
@@ -181,6 +318,7 @@ def main():
     total_checked = 0
     suspicious = []
     unmatched_remaining = []
+    library_summary = []
 
     for lib in libs:
         print(f"\n{'='*50}", flush=True)
@@ -200,6 +338,7 @@ def main():
             title = item.get("title", "")
             year = item.get("year", "")
             orig = item.get("originalTitle", "")
+            slug = item.get("slug", "")
             guid = item.get("guid", "")
             rk = item.get("ratingKey", "")
 
@@ -218,34 +357,53 @@ def main():
 
             media = item.find(".//Media/Part")
             filepath = media.get("file", "") if media is not None else ""
-            filename = extract_filename(filepath)
-            folder = extract_folder_name(filepath, lib["type"])
-
-            source = filename if filename else folder
-            if not source:
+            source_candidates = source_candidates_for_item(base, args.token, rk, lib["type"], filepath)
+            if not source_candidates:
                 continue
+
+            non_collection = [src for src in source_candidates if not (lib["type"] == "movie" and is_collection_folder(src))]
+            source_candidates = non_collection if non_collection else source_candidates
+            source = max(
+                source_candidates,
+                key=lambda src: name_similarity(src, title, orig, slug),
+            )
 
             if is_collection_folder(source) and lib["type"] == "movie":
                 continue
 
             total_checked += 1
-            sim = name_similarity(source, title, orig)
+            normalized_source = normalize_source_name(source)
+            sim = name_similarity(source, title, orig, slug)
+            src_years = re.findall(r"[\(\[]?((?:19|20)\d{2})[\]\)]?", source)
+            year_mismatch = bool(
+                year and src_years and not any(abs(int(y) - int(year)) <= 1 for y in src_years)
+            )
+            subset_risk = franchise_subset_risk(source, title, orig, slug) and year_mismatch
+            weak_risk = weak_overlap_risk(source, title, orig, slug)
+            alias_risk = generic_english_alias_risk(source, title, orig)
 
-            if sim < args.threshold:
+            if sim < args.threshold or subset_risk or weak_risk or alias_risk:
                 reasons = []
-                if sim == 0:
+                if subset_risk:
+                    reasons.append("franchise subset mismatch")
+                if weak_risk:
+                    reasons.append("weak single-token overlap")
+                if alias_risk:
+                    reasons.append("ambiguous short English alias")
+                if not reasons and sim == 0:
                     reasons.append("completely different")
-                else:
+                elif not reasons:
                     reasons.append(f"low similarity ({sim:.2f})")
                 if year:
-                    src_years = re.findall(r"[\(\[]?((?:19|20)\d{2})[\]\)]?", source)
-                    if src_years and not any(abs(int(y) - int(year)) <= 1 for y in src_years):
+                    if year_mismatch:
                         reasons.append(f"year ({src_years} vs {year})")
 
                 suspicious.append({
                     "lib": lib["title"], "key": rk,
                     "source": source, "plex_title": title,
-                    "originalTitle": orig, "year": year,
+                    "source_candidates": source_candidates,
+                    "normalized_source": normalized_source,
+                    "originalTitle": orig, "slug": slug, "year": year,
                     "similarity": sim, "reasons": reasons,
                 })
                 print(f"  SUSPECT: {source[:60]} -> {title} ({year})", flush=True)
@@ -253,6 +411,13 @@ def main():
             time.sleep(args.delay)
 
         print(f"  {lib_count} items, {lib_unmatched} unmatched", flush=True)
+        library_summary.append({
+            "key": lib["key"],
+            "title": lib["title"],
+            "type": lib["type"],
+            "items": lib_count,
+            "unmatched": lib_unmatched,
+        })
 
     fixed = []
     unfixable = []
@@ -271,10 +436,7 @@ def main():
             else:
                 agent = "tv.plex.agents.movie"
 
-            clean = re.sub(r"[\(\[].*?[\)\]]", "", source).strip()
-            clean = re.sub(r"\.(BluRay|WEB|BD|DVD|1080p|2160p|720p|x264|x265|DD5|DTS|AAC|Remux|Complete|NF).*", "", clean, flags=re.IGNORECASE).strip()
-            clean = re.sub(r"\d+\.", "", clean, count=1).strip()
-            clean = re.sub(r"(S\d+|Season\s*\d+|SP\d*)", "", clean, flags=re.IGNORECASE).strip()
+            clean = normalize_source_name(source)
 
             chn_parts = re.findall(r"[\u4e00-\u9fff]+", clean)
             chn_title = "".join(chn_parts) if chn_parts else ""
@@ -298,7 +460,7 @@ def main():
                 print(f"  Searching: '{st}'...", flush=True)
                 match = search_match(base, args.token, s["key"], st, s["year"], agent)
                 if match and match["name"] != s["plex_title"]:
-                    new_sim = name_similarity(source, match["name"], "")
+                    new_sim = name_similarity(source, match["name"], "", match["name"])
                     if new_sim > s["similarity"]:
                         break
                 match = None
@@ -344,12 +506,14 @@ def main():
     result = {
         "total": total_items, "checked": total_checked,
         "suspicious_count": len(suspicious), "suspicious": suspicious,
-        "fixed": fixed, "unfixable": unfixable,
+        "fixed": fixed, "updated": fixed, "updated_count": len(fixed),
+        "unfixable": unfixable,
+        "library_summary": library_summary,
         "unmatched_remaining": unmatched_remaining,
     }
-    with open("/tmp/plex_verify_result.json", "w") as f:
+    with open(args.result_file, "w", encoding="utf-8") as f:
         json.dump(result, f, ensure_ascii=False, indent=2)
-    print(f"\nFull results saved to /tmp/plex_verify_result.json", flush=True)
+    print(f"\nFull results saved to {args.result_file}", flush=True)
 
 
 if __name__ == "__main__":

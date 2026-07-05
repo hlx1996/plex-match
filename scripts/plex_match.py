@@ -8,6 +8,7 @@ import time
 import re
 import sys
 import ssl
+import json
 
 ctx = ssl.create_default_context()
 
@@ -190,6 +191,7 @@ def main():
     parser.add_argument("--delay", type=float, default=1.0, help="Delay between requests (seconds)")
     parser.add_argument("--library", type=str, default=None, help="Only process specific library by key (e.g. 1)")
     parser.add_argument("--dry-run", action="store_true", help="List unmatched without matching")
+    parser.add_argument("--result-file", default="/tmp/plex_match_result.json", help="Where to save the JSON result")
     args = parser.parse_args()
 
     base = args.base.rstrip("/")
@@ -215,7 +217,10 @@ def main():
     total_success = 0
     total_failed = 0
     total_unmatched = 0
-    all_errors = []
+    matched_items = []
+    failed_items = []
+    unmatched_items = []
+    library_summary = []
 
     for lib in libs:
         print(f"{'='*50}", flush=True)
@@ -227,12 +232,37 @@ def main():
         print(f"Unmatched: {len(unmatched)}\n", flush=True)
 
         if not unmatched:
+            library_summary.append({
+                "key": lib["key"],
+                "title": lib["title"],
+                "type": lib["type"],
+                "unmatched": 0,
+                "matched": 0,
+                "failed": 0,
+            })
             print("All matched!\n", flush=True)
             continue
 
         if args.dry_run:
             for item in unmatched:
+                unmatched_items.append({
+                    "library_key": lib["key"],
+                    "library_title": lib["title"],
+                    "library_type": lib["type"],
+                    "ratingKey": item["ratingKey"],
+                    "title": item["title"],
+                    "year": item["year"],
+                    "type": item["type"],
+                })
                 print(f"  [{item['ratingKey']}] {item['title']} ({item['year']})", flush=True)
+            library_summary.append({
+                "key": lib["key"],
+                "title": lib["title"],
+                "type": lib["type"],
+                "unmatched": len(unmatched),
+                "matched": 0,
+                "failed": 0,
+            })
             print()
             continue
 
@@ -251,22 +281,63 @@ def main():
             if not match:
                 print(f"  -> No match found", flush=True)
                 failed += 1
-                all_errors.append(f"{lib['title']}: {title} ({year})")
+                failed_items.append({
+                    "library_key": lib["key"],
+                    "library_title": lib["title"],
+                    "library_type": lib["type"],
+                    "ratingKey": rk,
+                    "title": title,
+                    "year": year,
+                    "type": item["type"],
+                    "reason": "no_match_found",
+                })
                 time.sleep(0.5)
                 continue
 
             if apply_match(base, args.token, rk, match["guid"], match["name"], match["year"]):
                 print(f"  -> OK: {match['name']} ({match['year']})", flush=True)
                 success += 1
+                matched_items.append({
+                    "library_key": lib["key"],
+                    "library_title": lib["title"],
+                    "library_type": lib["type"],
+                    "ratingKey": rk,
+                    "source_title": title,
+                    "source_year": year,
+                    "type": item["type"],
+                    "matched_title": match["name"],
+                    "matched_year": match["year"],
+                    "guid": match["guid"],
+                })
             else:
                 print(f"  -> FAILED to apply", flush=True)
                 failed += 1
-                all_errors.append(f"{lib['title']}: {title} ({year})")
+                failed_items.append({
+                    "library_key": lib["key"],
+                    "library_title": lib["title"],
+                    "library_type": lib["type"],
+                    "ratingKey": rk,
+                    "title": title,
+                    "year": year,
+                    "type": item["type"],
+                    "reason": "apply_failed",
+                    "candidate_title": match["name"],
+                    "candidate_year": match["year"],
+                    "candidate_guid": match["guid"],
+                })
 
             time.sleep(args.delay)
 
         total_success += success
         total_failed += failed
+        library_summary.append({
+            "key": lib["key"],
+            "title": lib["title"],
+            "type": lib["type"],
+            "unmatched": len(unmatched),
+            "matched": success,
+            "failed": failed,
+        })
         print(f"\n  Library done: {success} matched, {failed} failed\n", flush=True)
 
     print(f"{'='*50}", flush=True)
@@ -276,10 +347,25 @@ def main():
     else:
         print(f"Matched: {total_success}", flush=True)
         print(f"Failed:  {total_failed}", flush=True)
-    if all_errors:
+    if failed_items:
         print(f"\nFailed items:", flush=True)
-        for e in all_errors:
-            print(f"  - {e}", flush=True)
+        for item in failed_items:
+            print(f"  - {item['library_title']}: {item['title']} ({item['year']})", flush=True)
+
+    result = {
+        "dry_run": args.dry_run,
+        "total_unmatched": total_unmatched,
+        "matched_count": total_success,
+        "failed_count": total_failed,
+        "library_summary": library_summary,
+        "matched_items": matched_items,
+        "failed_items": failed_items,
+        "unmatched_items": unmatched_items,
+    }
+    with open(args.result_file, "w", encoding="utf-8") as handle:
+        json.dump(result, handle, ensure_ascii=False, indent=2)
+
+    print(f"\nResult saved to {args.result_file}", flush=True)
     print(flush=True)
 
 

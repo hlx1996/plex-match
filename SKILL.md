@@ -1,12 +1,12 @@
 ---
 name: plex-match
-description: "Plex 媒体库批量匹配与验证：扫描 Plex 服务器所有媒体库（电影、电视剧等），找到未匹配（unmatched）的资源并自动匹配元数据，然后验证所有匹配是否正确并自动修正错误。当用户提到 Plex 匹配、unmatched、元数据匹配、Plex 刮削、海报缺失时使用。"
+description: "Plex 媒体库全库扫描、批量匹配与验证：先强制 scan 全部媒体库，再找到未匹配（unmatched）的资源并自动匹配元数据，然后验证全部匹配是否正确并自动修正错误，最后输出本次新 match 和新 update 的媒体列表。当用户提到 Plex 匹配、unmatched、元数据匹配、Plex 刮削、海报缺失时使用。"
 argument-hint: "<plex-url>"
 ---
 
 # Plex Match
 
-批量匹配 Plex 服务器中所有媒体库的未匹配资源，并验证所有匹配的正确性。
+先强制扫描整个 Plex 媒体库，再批量匹配所有未匹配资源，并验证全部匹配的正确性。
 
 ## Workflow
 
@@ -25,6 +25,8 @@ argument-hint: "<plex-url>"
 
 等待用户回复 Token 后继续。
 
+⚠️ 如果 token 看起来是正确的但 API 返回 401，要特别检查是否混入了**形似英文字母的非 ASCII 字符**（例如西里尔字母 `у` 看起来像英文字母 `y`）。Plex token 应该是纯 ASCII。
+
 ### Phase 2: 验证连接
 
 ```bash
@@ -33,57 +35,107 @@ curl -s "<BASE>/library/sections?X-Plex-Token=<TOKEN>" | head -200
 
 确认能获取到媒体库列表。401 则 Token 无效，引导重新获取。
 
-### Phase 3: 批量匹配 Unmatched
+### Phase 3: 先强制 scan 全部媒体库
+
+先定位 **Python 3**。不要回退到系统自带的 `python`，因为某些 NAS 环境里的 `python` 实际上还是 Python 2，会导致脚本无法运行。实机可用的兜底路径示例：
 
 ```bash
-python3 <skill-dir>/scripts/plex_match.py \
+if command -v python3 >/dev/null 2>&1; then
+  PYTHON_BIN="$(command -v python3)"
+elif [ -x /share/CACHEDEV1_DATA/.qpkg/Apache84/bin/python3.13 ]; then
+  export LD_LIBRARY_PATH="/share/CACHEDEV1_DATA/.qpkg/Apache84/lib${LD_LIBRARY_PATH:+:$LD_LIBRARY_PATH}"
+  PYTHON_BIN="/share/CACHEDEV1_DATA/.qpkg/Apache84/bin/python3.13"
+else
+  echo "Python 3 is required for plex-match scripts" >&2
+  exit 1
+fi
+```
+
+然后先触发全库扫描，并等待所有库的 `refreshing` 状态回到 `0`：
+
+```bash
+"$PYTHON_BIN" <skill-dir>/scripts/plex_scan.py \
+  --base "<BASE>" --token "<TOKEN>"
+```
+
+扫描结果会保存到 `/tmp/plex_scan_result.json`。只有在扫描完成后，才能进入后续匹配步骤。
+
+### Phase 4: 批量匹配 Unmatched
+
+```bash
+"$PYTHON_BIN" <skill-dir>/scripts/plex_match.py \
   --base "<BASE>" --token "<TOKEN>" --delay 1.0
 ```
 
-参数：`--delay`（请求间隔）、`--library <key>`（指定库）、`--dry-run`（只列出不匹配）。
+参数：`--delay`（请求间隔）、`--library <key>`（指定库）、`--dry-run`（只列出不匹配）、`--result-file`（指定 JSON 结果路径）。
 
 匹配量大时用 background 运行，定期检查日志进度。脚本内置 503 重试（3 次，间隔递增）。
+
+脚本会把结果保存到 `/tmp/plex_match_result.json`，其中：
+- `matched_items` = 本次新 match 的媒体列表
+- `failed_items` = 本次仍未成功匹配的媒体列表
 
 匹配完成后，对脚本报告的 failed 项，逐个手动搜索修正：
 1. 用 `/library/metadata/<key>/matches` 搜索正确结果
 2. 用 `PUT /library/metadata/<key>/match` 应用匹配
 3. 如果 Plex 数据库中确实没有该项，记录并告知用户
 
-### Phase 4: 验证所有匹配
+### Phase 5: 验证所有匹配
 
 匹配完成后 **必须** 运行验证脚本，检查全部媒体（包括原本已匹配的）：
 
 ```bash
-python3 <skill-dir>/scripts/plex_verify.py \
+"$PYTHON_BIN" <skill-dir>/scripts/plex_verify.py \
   --base "<BASE>" --token "<TOKEN>" --fix --delay 0.3
 ```
 
 脚本会：
 1. 遍历所有媒体库，获取每项的文件路径
-2. 对比文件名与 Plex 匹配标题的相似度
-3. 标记可疑匹配（相似度低于阈值）
-4. `--fix` 模式自动搜索正确匹配并修正
-5. 报告仍然 unmatched 的项
+2. 对电影，读取 `Media/Part` 文件路径；对电视剧/动漫/纪录片，额外读取 show 级别的 `Location` 目录路径
+3. 对比清洗后的来源路径与 Plex 的 `title` / `originalTitle` / `slug` 相似度，尽量减少“英文文件名 + 中文标题”的误报
+4. 将“高置信度错配”和“翻译/别名待人工复核”区分开，不要把所有低相似度项目都直接强修
+5. `--fix` 模式只自动修复高置信度错误；其余项目进入人工复核清单
+6. 修完后必须按**原始来源路径**回查归属，确认该目录/文件已经挂到正确条目下
 
-结果保存到 `/tmp/plex_verify_result.json`。
+结果保存到 `/tmp/plex_verify_result.json`。其中：
+- `updated` / `fixed` = 本次新 update（修正）列表
+- `unmatched_remaining` = 仍未匹配的项目
+- `unfixable` = 需要人工审查的项目
 
 验证完成后，读取 JSON 结果并向用户汇报：
 - 自动修复了多少项
 - 仍然 unmatched 的项（提醒用户关注，**不要强行匹配**）
 - 需要手动审查的项
 
-### Phase 5: 汇报结果
+### Phase 6: 汇报结果
 
 向用户输出最终报告：
 - 各媒体库总数和 unmatched 数
 - 本次新匹配数 / 失败数
 - 验证发现并修正的错误数
+- **新 match 列表**（读取 `/tmp/plex_match_result.json` 的 `matched_items`）
+- **新 update 列表**（读取 `/tmp/plex_verify_result.json` 的 `updated`）
 - 仍无法匹配的项（建议用户检查文件名是否规范）
 - 提醒刷新 Plex 界面加载新元数据
 
-### Phase 6: 中文本地化 (Chinese Localization for Plex)
+如果 `matched_items` 或 `updated` 为空，要明确输出“无”，不要省略这一节。
 
-匹配和验证完成后，运行 CLP 对媒体库进行中文本地化（拼音排序 + 标签汉化）。
+### Phase 6.5: 用户反馈后的定向 rematch
+
+如果用户明确指出了“当前错误标题 → 正确目标标题”，把用户反馈视为**高优先级事实**，直接做定向 rematch，不要继续依赖相似度猜测。
+
+步骤：
+1. 先用 `/library/metadata/<ratingKey>/matches` 按**目标标题**拉候选
+2. 选择与用户目标一致的 `guid`
+3. 调用 `PUT /library/metadata/<ratingKey>/match`
+4. **不要只看旧 `ratingKey` 是否还在**；对于电视剧/动漫，match 到已存在 show 后，旧条目可能会并入目标 show，旧 `ratingKey` 会消失
+5. 最后按**原始目录路径**回查，确认该路径现在归属于正确作品
+
+这一条是本次实操的重要结论：对 show 来说，“路径归属正确”比“旧 `ratingKey` 还存在”更能证明修正成功。
+
+### Phase 7: 可选 - Chinese Localization for Plex
+
+只有在用户确认要继续做中文本地化时，才运行 CLP 对媒体库进行拼音排序和标签汉化。不要默认在核心匹配流程里自动执行。
 
 1. 克隆仓库并安装依赖：
 
@@ -110,9 +162,9 @@ python3 chinese-localization-for-plex.py --all
 
 脚本会将所有中文标题的排序字段改为拼音首字母缩写，并将英文标签汉化。已处理的项目会被跳过。
 
-### Phase 7: Plex-Trakt 同步 (PlexTraktSync)
+### Phase 8: 可选 - Plex-Trakt 同步 (PlexTraktSync)
 
-本地化完成后，运行 PlexTraktSync 将 Plex 观看记录、评分、收藏同步到 Trakt。
+只有在用户明确要求同步 Trakt，且准备好 Trakt 凭据时，才继续执行 PlexTraktSync。不要默认执行，因为首次登录需要额外交互式授权。
 
 1. 安装：
 
@@ -180,3 +232,58 @@ Plex 按剧集（show）级别匹配，`year` 字段是整部剧的首播年份�
 
 ### Plex API 不支持 Unmatch
 Plex 的 match API 只能将资源匹配到某个 guid，无法通过 API 取消匹配（Unmatch）。取消匹配只能在 Plex Web UI 中操作：点击 `...` → Match... → Unmatch。
+
+### refresh 接口是异步的
+`/library/sections/<key>/refresh` 返回 200 只代表任务已入队，不代表扫描已经完成。必须继续轮询 `/library/sections`，确认目标库的 `refreshing="0"` 后再开始批量匹配。
+
+### 少量外语片罗马字标题仍可能进入人工复核
+即使已经结合 `originalTitle` 和 `slug` 做相似度校验，仍可能有少量外语片因为文件名使用**罗马字/英译名**、而 Plex 元数据使用**中文名或原文字**而被标记为可疑，例如：
+- `Jagten` ↔ `The Hunt`
+- `Kimi to Nami ni Noretara` ↔ `若能与你共乘海浪之上`
+- `Gamlet` ↔ `哈姆雷特`
+
+这类项目要优先人工确认，**不要因为 verify 报警就强行改成别的匹配**。
+
+### 实操复盘：这次为什么会“反凑”
+
+这次真实出现的错配，根因主要有 4 类：
+
+1. **之前的 verify 对 show 检查不完整**
+   - 只看电影 `Part` 文件路径是不够的；动漫/电视剧很多条目只有 show 级 `Location` 路径
+   - 这会漏掉明显错配，例如：
+     - `大清风云` 实际目录是 `大宋提刑官2...`
+     - `斗罗大陆Ⅱ绝世唐门` 实际目录是 `Jujutsu.Kaisen.S02...`
+     - `特工科恩` 实际目录是 `SPY×FAMILY`
+     - `舞法天女之绚彩归来` 实际目录是 `Rick and Morty S04`
+     - `镖人` 实际目录是 `进击的巨人第一季第二季第三季`
+
+2. **不能把“只重叠一个词”当成正确匹配**
+   - `SPY×FAMILY` 和 `The Spy / 特工科恩` 只共享一个 `spy`
+   - `Made in Abyss S02` 和 `玛露露库的日常` 共享了同 franchise，但不是同一作品
+   - 结论：**单词级弱重叠**、**同 franchise 子集重叠**，都只能进人工复核，不能直接自动修
+
+3. **短英文标题同名碰撞风险很高**
+   - `Myth of Love` 这类短英文名，Plex 很可能命中另一个同名作品
+   - 即使标题和年份都对，也不代表作品就对
+   - 结论：如果文件名是**短英文别名**，而官方中文标题与它几乎没有 token 重叠，就必须人工确认，必要时让用户给出目标标题
+
+4. **合集/季包目录很容易把 show 带偏**
+   - 如果目录本身是“第一季第二季第三季合集”“S01-S08”等打包名，Plex 有时会把它归到错误条目
+   - 结论：这类目录要在 verify 结果里优先人工审查；修完后一定按目录归属回查
+
+### 下次执行时的硬规则
+
+1. **先 scan，再 match，再 verify**
+2. **verify 必须覆盖 show 的 `Location` 路径**，不能只看 movie `Part`
+3. **高置信度错配才自动修**
+   - 完全不同作品
+   - 用户明确给出“错误标题 → 正确标题”
+   - 修完后可按路径归属证明成功
+4. **以下情况只进人工复核**
+   - 只共享 1 个英文词
+   - 同 franchise 但像 parent show / spinoff
+   - 短英文别名 / unofficial English alias
+   - 合集目录 / 多季打包目录
+5. **修完后一定按原始路径回查**
+   - 对 show，允许旧 `ratingKey` 消失
+   - 只要原始目录已经并入正确作品，就算修正成功
