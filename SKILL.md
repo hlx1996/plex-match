@@ -107,20 +107,7 @@ fi
 - 仍然 unmatched 的项（提醒用户关注，**不要强行匹配**）
 - 需要手动审查的项
 
-### Phase 6: 汇报结果
-
-向用户输出最终报告：
-- 各媒体库总数和 unmatched 数
-- 本次新匹配数 / 失败数
-- 验证发现并修正的错误数
-- **新 match 列表**（读取 `/tmp/plex_match_result.json` 的 `matched_items`）
-- **新 update 列表**（读取 `/tmp/plex_verify_result.json` 的 `updated`）
-- 仍无法匹配的项（建议用户检查文件名是否规范）
-- 提醒刷新 Plex 界面加载新元数据
-
-如果 `matched_items` 或 `updated` 为空，要明确输出“无”，不要省略这一节。
-
-### Phase 6.5: 用户反馈后的定向 rematch
+### Phase 5.5: 用户反馈后的定向 rematch
 
 如果用户明确指出了“当前错误标题 → 正确目标标题”，把用户反馈视为**高优先级事实**，直接做定向 rematch，不要继续依赖相似度猜测。
 
@@ -133,9 +120,9 @@ fi
 
 这一条是本次实操的重要结论：对 show 来说，“路径归属正确”比“旧 `ratingKey` 还存在”更能证明修正成功。
 
-### Phase 7: 可选 - Chinese Localization for Plex
+### Phase 7: Chinese Localization for Plex（必做）
 
-只有在用户确认要继续做中文本地化时，才运行 CLP 对媒体库进行拼音排序和标签汉化。不要默认在核心匹配流程里自动执行。
+匹配、验证和必要的定向 rematch 完成后，**必须** 运行 CLP 对媒体库进行拼音排序和标签汉化。
 
 1. 克隆仓库并安装依赖：
 
@@ -143,6 +130,16 @@ fi
 cd /tmp && git clone https://github.com/x1ao4/chinese-localization-for-plex.git
 cd chinese-localization-for-plex
 pip3 install -r requirements.txt
+```
+
+如果当前环境的 `/tmp` 很小、`pip3`/`python3` 不可用，**不要** 在 `/tmp` 里建 venv 硬装。优先复用 Phase 3 已定位出的 `PYTHON_BIN`，并把依赖安装到宿主机持久目录（例如 `/share/CACHEDEV1_DATA/.qoder/tmp/plex-phase78/pydeps`）：
+
+```bash
+PHASE78_DIR="/share/CACHEDEV1_DATA/.qoder/tmp/plex-phase78/pydeps"
+mkdir -p "$PHASE78_DIR"
+"$PYTHON_BIN" -m pip install --target "$PHASE78_DIR" flask pypinyin requests
+PYTHONPATH="$PHASE78_DIR${PYTHONPATH:+:$PYTHONPATH}" \
+  "$PYTHON_BIN" chinese-localization-for-plex.py --all
 ```
 
 2. 配置 `config/config.ini`：
@@ -162,9 +159,9 @@ python3 chinese-localization-for-plex.py --all
 
 脚本会将所有中文标题的排序字段改为拼音首字母缩写，并将英文标签汉化。已处理的项目会被跳过。
 
-### Phase 8: 可选 - Plex-Trakt 同步 (PlexTraktSync)
+### Phase 8: Plex-Trakt 同步 (PlexTraktSync)（必做）
 
-只有在用户明确要求同步 Trakt，且准备好 Trakt 凭据时，才继续执行 PlexTraktSync。不要默认执行，因为首次登录需要额外交互式授权。
+中文本地化完成后，**必须** 运行 PlexTraktSync，将 Plex 与 Trakt 的观看记录、评分、收藏/想看等状态同步。
 
 1. 安装：
 
@@ -172,23 +169,92 @@ python3 chinese-localization-for-plex.py --all
 pipx install PlexTraktSync
 ```
 
-2. 登录配置（首次需要交互式配置 Trakt 和 Plex 凭据）：
+如果 `pipx` 不可用，或者 `/tmp` / 默认缓存目录空间太小导致安装失败，改用宿主机持久目录安装并显式指定 `PTS_CONFIG_DIR` / `PYTHONPATH`：
 
 ```bash
-plextraktsync login
+PHASE78_DIR="/share/CACHEDEV1_DATA/.qoder/tmp/plex-phase78/pydeps"
+mkdir -p "$PHASE78_DIR"
+"$PYTHON_BIN" -m pip install --target "$PHASE78_DIR" PlexTraktSync
+export PTS_CONFIG_DIR="$PHASE78_DIR"
+export PYTHONPATH="$PHASE78_DIR${PYTHONPATH:+:$PYTHONPATH}"
 ```
 
-按提示完成 Trakt OAuth 授权和 Plex 服务器连接。需要用户提供：
+2. 先把 Plex 服务器写进 `servers.yml`，至少包含：
+
+```yaml
+servers:
+  default:
+    token: <TOKEN>
+    urls:
+      - <BASE>
+```
+
+3. 完成 Trakt 登录（首次需要交互式授权）：
+
+```bash
+plextraktsync trakt-login
+```
+
+如果环境里已经有可用的 `.pytrakt.json` / `.env` / `servers.yml`，直接复用；否则就必须现场补齐并完成授权。首次登录至少需要：
 - Trakt API Client ID 和 Client Secret（从 https://trakt.tv/oauth/applications/new 创建）
 - Plex 服务器 URL 和 Token（复用 Phase 1 获取的信息）
 
-3. 运行同步：
+对于无头/NAS 环境，如果 `trakt-login` / `login` 因 `RemoteDisconnected`、`requests-cache`、TLS 或其他网络异常失败，**不要卡住重试同一条命令**；改用本 skill 自带的手动 device-auth 兜底脚本：
+
+```bash
+"$PYTHON_BIN" <skill-dir>/scripts/plex_trakt_device_login.py start \
+  --client-id "<TRAKT_CLIENT_ID>" \
+  --state-file /tmp/plex_trakt_device_auth.json
+```
+
+读取输出里的 `user_code` 和 `verification_url`，让用户完成授权后，再执行：
+
+```bash
+"$PYTHON_BIN" <skill-dir>/scripts/plex_trakt_device_login.py finish \
+  --client-id "<TRAKT_CLIENT_ID>" \
+  --client-secret "<TRAKT_CLIENT_SECRET>" \
+  --state-file /tmp/plex_trakt_device_auth.json \
+  --config-dir "$PTS_CONFIG_DIR" \
+  --plex-server-name default
+```
+
+这一步会把 Trakt token 写入 `.pytrakt.json`，并把 `TRAKT_USERNAME` / `PLEX_SERVER` 写入 `.env`，供 PlexTraktSync 直接复用。
+
+4. 运行同步：
 
 ```bash
 plextraktsync sync
 ```
 
-同步完成后向用户汇报同步结果。
+如果同步过程中卡在 `metadata.provider.plex.tv`、Plex Online watchlist 或 liked lists 超时，不要因此放弃整个 phase 8。先把以下开关临时关闭，至少完成 **watched / rating** 的核心同步：
+
+```yaml
+sync:
+  plex_to_trakt:
+    watchlist: false
+  trakt_to_plex:
+    liked_lists: false
+    watchlist: false
+```
+
+同步完成后，把成功同步的核心结果并入最终报告；如果 watchlist / liked lists 因 Plex Online 超时被跳过，也要明确告知用户。
+
+### Phase 6: 最终输出 & 修正
+
+向用户输出最终报告：
+- 各媒体库总数和 unmatched 数
+- 本次新匹配数 / 失败数
+- 验证发现并修正的错误数
+- 用户反馈后的**定向 rematch 列表**（Phase 5.5；如果有手动改正，必须单独列出，不要被 `updated=[]` 掩盖）
+- 中文本地化执行结果（phase 7）
+- PlexTraktSync 执行结果（phase 8）
+- **新 match 列表**（读取 `/tmp/plex_match_result.json` 的 `matched_items`）
+- **新 update 列表**（读取 `/tmp/plex_verify_result.json` 的 `updated`）
+- 仍无法匹配的项（建议用户检查文件名是否规范）
+- 需要人工修正但暂不应强改的项
+- 提醒刷新 Plex 界面加载新元数据
+
+如果 `matched_items` 或 `updated` 为空，要明确输出“无”，不要省略这一节。
 
 ## 已知陷阱
 
@@ -235,6 +301,37 @@ Plex 的 match API 只能将资源匹配到某个 guid，无法通过 API 取消
 
 ### refresh 接口是异步的
 `/library/sections/<key>/refresh` 返回 200 只代表任务已入队，不代表扫描已经完成。必须继续轮询 `/library/sections`，确认目标库的 `refreshing="0"` 后再开始批量匹配。
+
+### 无头/NAS 环境下，`trakt-login` 可能直接失败
+在某些 NAS / 精简 Python 环境里，`plextraktsync trakt-login` 可能因为 `RemoteDisconnected`、`requests-cache`、TLS 或上游短暂波动而直接失败。遇到这种情况时：
+1. **不要** 一直重试同一条 `trakt-login`
+2. 先确认 `https://api.trakt.tv/oauth/device/code` 直连可用
+3. 改用本 skill 的 `scripts/plex_trakt_device_login.py` 走手动 device auth
+4. 授权成功后，确认 `.pytrakt.json` 和 `.env` 已写好，再继续 `sync`
+
+### Plex Online watchlist / liked lists 可能拖垮整个 sync
+`plextraktsync sync` 不只访问本地 PMS；如果启用了 Plex watchlist / liked lists，同步过程中还会访问 Plex Online（如 `metadata.provider.plex.tv`）。这条链路在某些网络环境里会超时，导致整个 sync 提前退出。
+
+如果核心目标只是完成 **watched / rating** 同步，而 Plex Online 访问不稳定，应临时关闭：
+- `sync.plex_to_trakt.watchlist`
+- `sync.trakt_to_plex.watchlist`
+- `sync.trakt_to_plex.liked_lists`
+
+然后先完成核心同步，并在最终报告里明确说明 watchlist / liked lists 本次被跳过。
+
+### 某些 Trakt watched-show 响应会返回 `seasons: null`
+实操中遇到过 `plextraktsync sync` 在 `plextraktsync/pytrakt_extensions.py` 崩溃，报错：
+
+```text
+TypeError: 'NoneType' object is not iterable
+```
+
+根因是 Trakt 的部分 watched-show / season 数据字段可能返回 `null`，而 PlexTraktSync 当前版本直接迭代了 `shows` / `seasons` / `episodes`。
+
+如果命中这个问题：
+1. 先确认报错栈是否落在 `pytrakt_extensions.py`
+2. 对本地安装的 PlexTraktSync 做最小兼容修复：把 `shows`、`seasons`、`episodes` 的 `None` 当空列表处理
+3. 修完后再重跑 `plextraktsync sync`
 
 ### 少量外语片罗马字标题仍可能进入人工复核
 即使已经结合 `originalTitle` 和 `slug` 做相似度校验，仍可能有少量外语片因为文件名使用**罗马字/英译名**、而 Plex 元数据使用**中文名或原文字**而被标记为可疑，例如：
