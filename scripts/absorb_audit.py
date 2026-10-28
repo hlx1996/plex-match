@@ -3,9 +3,11 @@
 """Find shows whose media parts come from folders that are NOT variants of the
 same series -- i.e. unrelated releases absorbed into one Plex entry.
 
-This is the failure mode behind 来自深渊 swallowing Madoka Magica / Summer Time
-Rendering / Scissor Seven S2: folders whose names are entirely [bracket] groups
-reduce to an empty show title, so the scanner piles them onto a neighbour.
+The usual cause: folders whose names are entirely [bracket] groups reduce to an
+empty show title after the scanner strips release-group/spec tags, so several
+unrelated series collapse onto one entry -- even across different library roots.
+The season/episode guids all look correct, so unmatched counts never reveal it;
+the tell is media_part count being a multiple of the episode count.
 
 Multi-version duplicates (same series, two encodes) are expected and get
 reported separately from genuinely unrelated folders.
@@ -35,7 +37,8 @@ def toks(name):
         t = t.strip(" -·:：!！?？~～")
         if len(t) >= 2 and not t.isdigit():
             out.add(t.lower())
-        # CJK has no spaces; split into 2-grams so 刺客伍六七 matches 伍六七
+        # CJK has no spaces; split into 2-grams so a longer title still
+        # intersects a shorter one sharing a substring
         if re.search(r"[\u4e00-\u9fff]", t) and len(t) >= 2:
             for i in range(len(t) - 1):
                 out.add(t[i:i + 2])

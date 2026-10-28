@@ -2,10 +2,11 @@
 # -*- coding: utf-8 -*-
 """Accurate unmatched inventory: count FILES, not episode slots.
 
-The naive per-episode count hides the worst cases, because when the scanner
-can't find an episode number it piles every file in the folder onto ONE phantom
-slot (17.3 关于性: 9 files -> S1E17; 白色巨塔: 21 files -> S1E2003). Those read
-as "1 unmatched episode" but are really "the whole folder is unindexed".
+The naive per-episode count hides the worst cases: when the scanner can't find
+an episode number it piles EVERY file in the folder onto one phantom slot -- a
+leading number in the folder name hijacks the parse, a non-UTF-8 filename loses
+its 第NN話 token and the scanner grabs the year instead. Those read as
+"1 unmatched episode" but really mean "the whole folder is unindexed".
 """
 import sqlite3, urllib.parse, os, re, sys, json, collections
 import _config

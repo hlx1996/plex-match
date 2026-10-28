@@ -2,10 +2,13 @@
 # -*- coding: utf-8 -*-
 """Snapshot every movie's identity so matches can be re-applied after a move.
 
-Moving a file inside a movie library does NOT reliably re-link: in the previous
-round 3 of 9 moved films came back as brand-new `local://` entries. So record
-file path -> (guid, title, year, ratingKey, title_sort, collections, watch
-state) keyed by BASENAME, which survives the move.
+Moving a file inside a movie library does NOT reliably re-link: Plex often
+creates a brand-new `local://` entry and leaves the old one behind, so the same
+film shows up twice and the total count goes UP. Which ones break is
+unpredictable, so always snapshot before a bulk move.
+
+Record file path -> (guid, title, year, ratingKey, title_sort, watch state),
+keyed by BASENAME, which survives the move.
 """
 import sqlite3, urllib.parse, json, os, sys
 import _config

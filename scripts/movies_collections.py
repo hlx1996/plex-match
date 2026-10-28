@@ -2,8 +2,9 @@
 # -*- coding: utf-8 -*-
 """Move every non-year-bucket folder at the Movies root into Movies/Collections/.
 
-Year buckets stay at the root; everything else is a multi-film collection
-(豆瓣 Top100 / IMDb Top250 / 漫威 / 魔戒 / 哈利波特 / 导演合集 …).
+Year buckets stay at the root; anything else at the root is assumed to be a
+multi-film collection (franchise box sets, top-N lists, director retrospectives).
+Adjust BUCKET to your own bucket naming scheme.
 """
 import json, os, re, sys
 
